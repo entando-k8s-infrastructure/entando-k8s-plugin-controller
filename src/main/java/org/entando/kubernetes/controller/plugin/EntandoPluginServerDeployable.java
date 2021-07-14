@@ -22,33 +22,65 @@ import io.fabric8.kubernetes.api.model.apps.Deployment;
 import io.fabric8.kubernetes.api.model.extensions.Ingress;
 import java.util.ArrayList;
 import java.util.List;
-import org.entando.kubernetes.controller.spi.common.EntandoOperatorComplianceMode;
-import org.entando.kubernetes.controller.spi.common.EntandoOperatorSpiConfig;
+import java.util.Optional;
 import org.entando.kubernetes.controller.spi.common.NameUtils;
 import org.entando.kubernetes.controller.spi.container.DeployableContainer;
-import org.entando.kubernetes.controller.spi.container.KeycloakConnectionConfig;
+import org.entando.kubernetes.controller.spi.container.KeycloakName;
 import org.entando.kubernetes.controller.spi.deployable.DbAwareDeployable;
-import org.entando.kubernetes.controller.spi.result.DatabaseServiceResult;
+import org.entando.kubernetes.controller.spi.deployable.SsoAwareDeployable;
+import org.entando.kubernetes.controller.spi.deployable.SsoClientConfig;
+import org.entando.kubernetes.controller.spi.deployable.SsoConnectionInfo;
+import org.entando.kubernetes.controller.spi.result.DatabaseConnectionInfo;
 import org.entando.kubernetes.controller.support.spibase.IngressingDeployableBase;
+import org.entando.kubernetes.model.common.KeycloakToUse;
 import org.entando.kubernetes.model.plugin.EntandoPlugin;
-import org.entando.kubernetes.model.plugin.PluginSecurityLevel;
 
-public class EntandoPluginServerDeployable
-        implements IngressingDeployableBase<EntandoPluginDeploymentResult>, DbAwareDeployable<EntandoPluginDeploymentResult> {
+public class EntandoPluginServerDeployable implements IngressingDeployableBase<EntandoPluginDeploymentResult>,
+        DbAwareDeployable<EntandoPluginDeploymentResult>,
+        SsoAwareDeployable<EntandoPluginDeploymentResult> {
 
+    public static final String ENTANDO_APP_ROLE = "entandoApp";
+    public static final long DEFAULT_USER_ID = 185L;
     private final EntandoPlugin entandoPlugin;
     private final List<DeployableContainer> containers;
+    private final SsoConnectionInfo ssoConnectionInfo;
 
-    public EntandoPluginServerDeployable(DatabaseServiceResult databaseServiceResult,
-            KeycloakConnectionConfig keycloakConnectionConfig, EntandoPlugin entandoPlugin) {
+    public EntandoPluginServerDeployable(DatabaseConnectionInfo databaseConnectionInfo,
+            SsoConnectionInfo ssoConnectionInfo, EntandoPlugin entandoPlugin) {
         this.entandoPlugin = entandoPlugin;
-        //TODO make decision on which other containers to include based on the EntandoPlugin.spec
         this.containers = new ArrayList<>();
-        this.containers.add(new EntandoPluginDeployableContainer(entandoPlugin, keycloakConnectionConfig, databaseServiceResult));
-        if (EntandoOperatorSpiConfig.getComplianceMode() != EntandoOperatorComplianceMode.REDHAT
-                && entandoPlugin.getSpec().getSecurityLevel().orElse(PluginSecurityLevel.STRICT) == PluginSecurityLevel.LENIENT) {
-            this.containers.add(new EntandoPluginSidecarDeployableContainer(entandoPlugin, keycloakConnectionConfig));
-        }
+        this.ssoConnectionInfo = ssoConnectionInfo;
+        this.containers
+                .add(new EntandoPluginDeployableContainer(entandoPlugin, ssoConnectionInfo, databaseConnectionInfo, getSsoClientConfig()));
+    }
+
+    @Override
+    public SsoConnectionInfo getSsoConnectionInfo() {
+        return this.ssoConnectionInfo;
+    }
+
+    @Override
+    public SsoClientConfig getSsoClientConfig() {
+        return new SsoClientConfig(determineRealm(entandoPlugin, getSsoConnectionInfo()),
+                entandoPlugin.getMetadata().getName() + "-" + NameUtils.DEFAULT_SERVER_QUALIFIER,
+                entandoPlugin.getMetadata().getName(), entandoPlugin.getSpec().getRoles(),
+                entandoPlugin.getSpec().getPermissions())
+                .withRole(ENTANDO_APP_ROLE);
+    }
+
+    public static String determineRealm(EntandoPlugin entandoApp, SsoConnectionInfo ssoConnectionInfo) {
+        return entandoApp.getSpec().getKeycloakToUse().flatMap(KeycloakToUse::getRealm).or(() -> ssoConnectionInfo.getDefaultRealm())
+                .orElse(KeycloakName.ENTANDO_DEFAULT_KEYCLOAK_REALM);
+    }
+
+    @Override
+    public boolean isIngressRequired() {
+        return true;
+    }
+
+    @Override
+    public Optional<Long> getFileSystemUserAndGroupId() {
+        return Optional.of(185L);
     }
 
     @Override
@@ -67,6 +99,11 @@ public class EntandoPluginServerDeployable
     }
 
     @Override
+    public Optional<String> getQualifier() {
+        return Optional.empty();
+    }
+
+    @Override
     public String getIngressName() {
         return NameUtils.standardIngressName(entandoPlugin);
     }
@@ -74,11 +111,6 @@ public class EntandoPluginServerDeployable
     @Override
     public String getIngressNamespace() {
         return entandoPlugin.getMetadata().getNamespace();
-    }
-
-    @Override
-    public String getNameQualifier() {
-        return NameUtils.DEFAULT_SERVER_QUALIFIER;
     }
 
     @Override
